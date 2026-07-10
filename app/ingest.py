@@ -1,4 +1,4 @@
-﻿import os
+import os
 import re
 import uuid
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import chromadb
 import tiktoken
 from dotenv import load_dotenv
-from openai import OpenAI
+from sentence_transformers import SentenceTransformer
 
 
 load_dotenv()
@@ -16,10 +16,11 @@ DOCS_DIR = ROOT_DIR / "data" / "docs"
 CHROMA_DIR = ROOT_DIR / "data" / "chroma_db"
 
 COLLECTION_NAME = "company_policies"
-EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+EMBEDDING_MODEL = os.getenv("LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
 
 encoding = tiktoken.get_encoding("cl100k_base")
+embedding_model = SentenceTransformer(EMBEDDING_MODEL)
 
 
 def count_tokens(text):
@@ -41,15 +42,45 @@ def read_markdown_files():
     return documents
 
 
-def split_markdown_sections(text):
+def looks_like_heading(line):
+    stripped = line.strip()
+
+    if not stripped:
+        return False
+
+    if re.match(r"^#{1,6}\s+\S+", stripped):
+        return True
+
+    if re.match(r"^\d+(\.\d+)*[.)]?\s+[A-Z][A-Za-z0-9 ,/&()-]{2,}$", stripped):
+        return True
+
+    if re.match(r"^[A-Z][A-Za-z0-9 ,/&()-]{2,}:$", stripped):
+        return True
+
+    words = stripped.split()
+    if 1 <= len(words) <= 8 and stripped.isupper() and any(char.isalpha() for char in stripped):
+        return True
+
+    return False
+
+
+def normalise_heading(line):
+    stripped = line.strip()
+    markdown_match = re.match(r"^#{1,6}\s+(.+)$", stripped)
+
+    if markdown_match:
+        return markdown_match.group(1).strip()
+
+    return stripped.rstrip(":").strip()
+
+
+def split_document_sections(text):
     sections = []
-    current_heading = "Document"
+    current_heading = "General"
     current_lines = []
 
     for line in text.splitlines():
-        heading_match = re.match(r"^(#{1,6})\s+(.+)$", line.strip())
-
-        if heading_match:
+        if looks_like_heading(line):
             if current_lines:
                 sections.append(
                     {
@@ -59,7 +90,7 @@ def split_markdown_sections(text):
                 )
                 current_lines = []
 
-            current_heading = heading_match.group(2).strip()
+            current_heading = normalise_heading(line)
         else:
             current_lines.append(line)
 
@@ -125,7 +156,7 @@ def chunk_section(section_text, max_tokens=250, overlap_tokens=40):
 
 def build_contextual_chunks(document, max_tokens=250, overlap_tokens=40):
     contextual_chunks = []
-    sections = split_markdown_sections(document["text"])
+    sections = split_document_sections(document["text"])
 
     for section in sections:
         chunks = chunk_section(section["text"], max_tokens, overlap_tokens)
@@ -148,13 +179,10 @@ def build_contextual_chunks(document, max_tokens=250, overlap_tokens=40):
 
 
 def embed_texts(texts):
-    client = OpenAI()
-    response = client.embeddings.create(
-        model=EMBEDDING_MODEL,
-        input=texts,
-    )
-
-    return [item.embedding for item in response.data]
+    return embedding_model.encode(
+        texts,
+        normalize_embeddings=True,
+    ).tolist()
 
 
 def build_vector_database():
